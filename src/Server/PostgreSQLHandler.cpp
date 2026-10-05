@@ -1138,6 +1138,12 @@ void PostgreSQLHandler::processQuery()
             return;
         }
 
+        /// Several statements below are answered without ever reaching `executeQuery` (and so
+        /// `astTraversal`): the driver `BEGIN` / `COMMIT` and setup `SET`s, the no-op `RESET` /
+        /// `UNLISTEN` / `DISCARD`, `PREPARE`, `DEALLOCATE` and `COPY`. Check here, for all of them,
+        /// that every rule listed in `query_rules` exists, as ordinary SQL does.
+        validateQueryRulesExist(session->sessionContext());
+
         bool psycopg2_cond = query->query == "BEGIN" || query->query == "COMMIT"; // psycopg2 starts and ends queries with BEGIN/COMMIT commands
         bool jdbc_cond = query->query.contains("SET extra_float_digits") || query->query.contains("SET application_name"); // jdbc starts with setting this parameter
         if (psycopg2_cond || jdbc_cond)

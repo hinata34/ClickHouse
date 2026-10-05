@@ -14,6 +14,7 @@
 #include <functional>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <Interpreters/Context.h>
 
 
@@ -455,6 +456,28 @@ bool astTraversal(ASTPtr &ast, ContextPtr context, std::vector<String> & applied
     return true;
 }
 
+
+void validateQueryRulesExist(ContextPtr context)
+{
+    const auto & settings = context->getSettingsRef();
+    const auto rules_setting = settings[Setting::query_rules].toString();
+    if (rules_setting.empty())
+        return;
+    auto active_rule_names = parseIdentifiersOrStringLiterals(rules_setting, settings);
+    if (active_rule_names.empty())
+        return;
+
+    std::unordered_set<String> existing_rule_names;
+    for (const auto & [rule_name, rule_object] : RewriteRules::instance().getAll())
+        existing_rule_names.insert(rule_name);
+
+    for (const auto & name : active_rule_names)
+        if (!existing_rule_names.contains(name))
+            throw Exception(
+                ErrorCodes::REWRITE_RULE_DOESNT_EXIST,
+                "Rewrite rule `{}` listed in the `query_rules` setting does not exist",
+                name);
+}
 
 void checkRewriteRuleTemplateLimits(const IAST & ast, const Settings & settings)
 {

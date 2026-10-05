@@ -21,6 +21,7 @@
 #include <IO/WriteBuffer.h>
 #include <IO/copyData.h>
 #include <Interpreters/DatabaseCatalog.h>
+#include <Interpreters/RewriteRulesASTTraversal.h>
 #include <Interpreters/Session.h>
 #include <Interpreters/executeQuery.h>
 #include <Interpreters/Context.h>
@@ -865,6 +866,12 @@ void MySQLHandler::comPing()
 void MySQLHandler::comQuery(ReadBuffer & payload, bool binary_protocol)
 {
     String query = String(payload.position(), payload.buffer().end());
+
+    /// The fast paths below answer the user's statement without passing it to `executeQuery`
+    /// (the federated-setup `SET` no-ops) or execute synthesized SQL with `query_rules` cleared
+    /// (the query and setting replacements), so the statement would otherwise skip the "every
+    /// rule listed in `query_rules` must exist" check that ordinary SQL gets in `astTraversal`.
+    validateQueryRulesExist(session->sessionContext());
 
     // This is a workaround in order to support adding ClickHouse to MySQL using federated server.
     // As ClickHouse doesn't support these statements, we just send OK packet in response.

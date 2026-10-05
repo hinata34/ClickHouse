@@ -15,6 +15,12 @@ struct Settings;
 bool astTraversal(ASTPtr& ast, ContextPtr context, std::vector<String> & applied_rules);
 void applyRule(ASTPtr& ast, RewriteRuleObjectPtr rule, std::unordered_map<String, ASTPtr>& matching_map);
 
+/// Throws `REWRITE_RULE_DOESNT_EXIST` if a rule listed in the `query_rules` setting of `context`
+/// does not exist. For wire-protocol handlers that answer a user statement without passing it to
+/// `executeQuery` (and therefore to `astTraversal`), so the statement is still subject to the same
+/// "every listed rule must exist" contract as any other user query.
+void validateQueryRulesExist(ContextPtr context);
+
 /// Enforces `max_ast_depth` / `max_ast_elements` on every rewrite-rule source/result
 /// template reachable from `ast` (including rule DDL nested below a wrapper such as
 /// `EXPLAIN AST CREATE RULE ...`). Those templates are stored outside `IAST::children`,
