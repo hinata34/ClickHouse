@@ -24,16 +24,19 @@ ASTPtr ASTShowTablesQuery::clone() const
     if (from)
         res->set(res->from, from->clone());
 
+    /// `where_expression` and `limit_length` are not children: the parser puts them into the
+    /// members only. Do not leave them shared with the source.
+    if (where_expression)
+        res->where_expression = where_expression->clone();
+    if (limit_length)
+        res->limit_length = limit_length->clone();
+
     cloneOutputOptions(*res);
     return res;
 }
 
 void ASTShowTablesQuery::updateTreeHashImpl(SipHash & hash_state, bool ignore_aliases) const
 {
-    ASTQueryWithOutput::updateTreeHashImpl(hash_state, ignore_aliases);
-    /// Fold in the semantic fields that are not part of `children` (the base implementation only
-    /// hashes `getID`, and `from` is hashed through `children`). Two `SHOW` queries that differ
-    /// only in these fields must not share a tree hash — see the header comment.
     hash_state.update(databases);
     hash_state.update(clusters);
     hash_state.update(cluster);
@@ -44,17 +47,27 @@ void ASTShowTablesQuery::updateTreeHashImpl(SipHash & hash_state, bool ignore_al
     hash_state.update(temporary);
     hash_state.update(caches);
     hash_state.update(full);
-    hash_state.update(cluster_str);
     hash_state.update(has_like);
-    hash_state.update(like);
     hash_state.update(not_like);
     hash_state.update(case_insensitive_like);
+
+    const auto update_string = [&hash_state](const String & value)
+    {
+        hash_state.update(value.size());
+        hash_state.update(value);
+    };
+
+    update_string(cluster_str);
+    update_string(like);
+
     hash_state.update(where_expression != nullptr);
     if (where_expression)
         where_expression->updateTreeHash(hash_state, ignore_aliases);
     hash_state.update(limit_length != nullptr);
     if (limit_length)
         limit_length->updateTreeHash(hash_state, ignore_aliases);
+
+    ASTQueryWithOutput::updateTreeHashImpl(hash_state, ignore_aliases);
 }
 
 String ASTShowTablesQuery::getFrom() const
@@ -66,10 +79,6 @@ String ASTShowTablesQuery::getFrom() const
 
 void ASTShowTablesQuery::formatLike(WriteBuffer & ostr, const FormatSettings &) const
 {
-    /// Emit the clause whenever a `LIKE` was present, even with an empty pattern: `SHOW TABLES
-    /// LIKE ''` differs from plain `SHOW TABLES` (see the `has_like` comment in the header), and
-    /// dropping the clause would lose it and the `not_like` / `case_insensitive_like` modifiers
-    /// on a format -> parse round-trip.
     if (has_like)
     {
         ostr << (not_like ? " NOT" : "")
@@ -89,49 +98,48 @@ void ASTShowTablesQuery::formatLimit(WriteBuffer & ostr, const FormatSettings & 
 
 void ASTShowTablesQuery::formatQueryImpl(WriteBuffer & ostr, const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
 {
-    /// The `FULL` modifier is parsed for every `SHOW` variant (before the selector keyword), so it
-    /// must be emitted here for every variant. Otherwise `SHOW FULL TABLES` formats as `SHOW TABLES`
-    /// and re-parses with `full = false`, which both loses semantics (`full` changes the result
-    /// columns) and breaks the format -> parse tree-hash round-trip the rewrite-rule matcher relies on.
-    ostr << "SHOW " << (full ? "FULL " : "");
-
     if (databases)
     {
-        ostr << "DATABASES";
+        ostr << "SHOW DATABASES";
         formatLike(ostr, settings);
         formatLimit(ostr, settings, state, frame);
+
     }
     else if (clusters)
     {
-        ostr << "CLUSTERS";
+        ostr << "SHOW CLUSTERS";
         formatLike(ostr, settings);
         formatLimit(ostr, settings, state, frame);
+
     }
     else if (cluster)
     {
-        ostr << "CLUSTER";
+        ostr << "SHOW CLUSTER";
         ostr << " " << backQuoteIfNeed(cluster_str);
     }
     else if (caches)
     {
-        ostr << "FILESYSTEM CACHES";
+        ostr << "SHOW FILESYSTEM CACHES";
         formatLike(ostr, settings);
         formatLimit(ostr, settings, state, frame);
     }
     else if (m_settings)
     {
-        ostr << (changed ? "CHANGED " : "") << "SETTINGS";
+        ostr << "SHOW " << (changed ? "CHANGED " : "") << "SETTINGS";
         formatLike(ostr, settings);
     }
     else if (merges)
     {
-        ostr << "MERGES";
+        ostr << "SHOW MERGES";
         formatLike(ostr, settings);
         formatLimit(ostr, settings, state, frame);
     }
     else
     {
-        ostr << (temporary ? "TEMPORARY " : "") <<
+        /// `full` changes the result schema of the table/dictionary form (`InterpreterShowTablesQuery`
+        /// selects `name, engine` instead of `name`), so dropping it here would make the formatted
+        /// query execute differently from the original.
+        ostr << "SHOW " << (full ? "FULL " : "") << (temporary ? "TEMPORARY " : "") <<
              (dictionaries ? "DICTIONARIES" : "TABLES");
 
         if (from)
@@ -178,8 +186,6 @@ void ASTShowTablesQuery::writeJSON(WriteBuffer & out) const
     if (!cluster_str.empty())
         w.writeString("cluster_str", cluster_str);
     if (has_like)
-        w.writeBool("has_like", true);
-    if (!like.empty())
         w.writeString("like", like);
     if (not_like)
         w.writeBool("not_like", true);
@@ -221,8 +227,8 @@ void ASTShowTablesQuery::readJSON(const Poco::JSON::Object & json)
     caches = r.getBool("caches");
     full = r.getBool("full");
     cluster_str = r.getString("cluster_str");
-    has_like = r.getBool("has_like");
     like = r.getString("like");
+    has_like = r.has("like");
     not_like = r.getBool("not_like");
     case_insensitive_like = r.getBool("case_insensitive_like");
     /// `from` is parser-produced as an `ASTIdentifier` (`ParserShowTablesQuery` uses
@@ -232,12 +238,9 @@ void ASTShowTablesQuery::readJSON(const Poco::JSON::Object & json)
     auto from_child = r.readChildOfType<ASTIdentifier>("from");
     if (from_child)
         set(from, from_child);
+    /// These are member-only in parser-produced ASTs and are hashed explicitly in updateTreeHashImpl.
     where_expression = r.readChild("where_expression");
-    if (where_expression)
-        children.push_back(where_expression);
     limit_length = r.readChild("limit_length");
-    if (limit_length)
-        children.push_back(limit_length);
 
     /// Restore output options inherited from `ASTQueryWithOutput` through the shared helper so
     /// the validation of their interdependencies stays in one place instead of diverging from
@@ -287,12 +290,19 @@ void ASTShowTablesQuery::readJSON(const Poco::JSON::Object & json)
             "'where_expression' is only valid for the `SHOW TABLES`/`SHOW DICTIONARIES` form "
             "during AST JSON deserialization");
 
-    /// In every form, the parser sets the pattern and the `NOT` / `ILIKE` modifiers only as part
-    /// of a LIKE clause, so they cannot exist without 'has_like'; `formatQueryImpl` silently drops
-    /// them when 'has_like' is not set.
-    if (!has_like && (!like.empty() || not_like || case_insensitive_like))
+    /// In every form, the parser consumes `NOT` and `ILIKE` only as part of a LIKE clause, so these
+    /// flags cannot exist without a LIKE clause.
+    if (!has_like && (not_like || case_insensitive_like))
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
-            "'like', 'not_like' and 'case_insensitive_like' require 'has_like' during AST JSON deserialization");
+            "'not_like' and 'case_insensitive_like' require a 'like' pattern during AST JSON deserialization");
+
+    /// The SQL grammar requires SHOW [CHANGED] SETTINGS to have LIKE/ILIKE and does not accept NOT LIKE.
+    if (m_settings && !has_like)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "`SHOW SETTINGS` requires a 'like' pattern during AST JSON deserialization");
+    if (m_settings && not_like)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS,
+            "'not_like' is not valid for `SHOW SETTINGS` during AST JSON deserialization");
 
     /// In the table/dictionary form, the parser accepts either a LIKE clause or a WHERE clause,
     /// never both, and `InterpreterShowTablesQuery` ignores 'where_expression' whenever 'like' is
@@ -303,7 +313,7 @@ void ASTShowTablesQuery::readJSON(const Poco::JSON::Object & json)
             "during AST JSON deserialization");
 
     /// `SHOW CLUSTER` and `SHOW FILESYSTEM CACHES` accept neither a LIKE pattern nor a LIMIT.
-    if ((cluster || caches) && has_like)
+    if ((cluster || caches) && (has_like || not_like || case_insensitive_like))
         throw Exception(ErrorCodes::BAD_ARGUMENTS,
             "LIKE is not valid for `SHOW CLUSTER`/`SHOW FILESYSTEM CACHES` during AST JSON deserialization");
 
