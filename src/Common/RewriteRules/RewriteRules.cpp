@@ -797,7 +797,15 @@ void RewriteRules::createRule(const ASTCreateRewriteRuleQuery & query)
     /// replica (a stale positive would reject a `CREATE RULE` that the storage is about to
     /// accept). `create` consults and mutates the storage atomically and throws
     /// `REWRITE_RULE_ALREADY_EXISTS` on a duplicate itself.
-    storage->create(ptr);
+    try
+    {
+        storage->create(ptr);
+    }
+    catch (...)
+    {
+        resyncAfterUncertainWrite(query.rule_name, lock);
+        throw;
+    }
     /// The cache may hold a stale entry for this name (dropped on another replica and recreated
     /// here), so overwrite instead of `add`, which would throw on a stale-positive cache.
     remove(query.rule_name, lock);
@@ -811,7 +819,16 @@ void RewriteRules::removeRule(const ASTDropRewriteRuleQuery & query)
     /// `removeIfExists` consults and mutates the storage atomically, so a rule that another
     /// replica has already dropped does not make `DROP RULE IF EXISTS` throw, and one that
     /// another replica has just created is dropped instead of being silently ignored.
-    const bool removed = storage->removeIfExists(query.rule_name);
+    bool removed = false;
+    try
+    {
+        removed = storage->removeIfExists(query.rule_name);
+    }
+    catch (...)
+    {
+        resyncAfterUncertainWrite(query.rule_name, lock);
+        throw;
+    }
     /// Drop the possibly stale cache entry either way.
     remove(query.rule_name, lock);
 
@@ -834,7 +851,15 @@ void RewriteRules::updateRule(const ASTAlterRewriteRuleQuery & query)
     /// `update` never creates a rule: it fails with `REWRITE_RULE_DOESNT_EXIST` when the rule is
     /// absent from the storage. That check - not the local cache - decides, so `ALTER RULE` works
     /// on a rule another replica has just created and fails on one it has just dropped.
-    storage->update(ptr);
+    try
+    {
+        storage->update(ptr);
+    }
+    catch (...)
+    {
+        resyncAfterUncertainWrite(query.rule_name, lock);
+        throw;
+    }
 
     auto it = std::find_if(
         loaded_rewrite_rules.begin(), loaded_rewrite_rules.end(),
@@ -843,6 +868,33 @@ void RewriteRules::updateRule(const ASTAlterRewriteRuleQuery & query)
         loaded_rewrite_rules.emplace_back(query.rule_name, std::move(ptr));
     else
         it->second = std::move(ptr);
+}
+
+void RewriteRules::resyncAfterUncertainWrite(const std::string & rule_name, std::lock_guard<std::mutex> & lock)
+{
+    /// Only a replicated storage can fail a write whose outcome is unknown: a lost Keeper
+    /// connection after the request was applied reports an error for a change that is already
+    /// durable. The local cache then cannot be assumed to match the source of truth, so re-read
+    /// it instead of serving the pre-change rule (or missing a new one) until the background
+    /// watcher reloads. For local storage a failed write leaves the files as they were.
+    if (!storage || !storage->isReplicated())
+        return;
+
+    try
+    {
+        reloadImpl(lock);
+    }
+    catch (...)
+    {
+        /// Even the re-read failed, so the current state of the affected rule is still unknown.
+        /// Fail closed: stop applying it locally rather than applying a possibly stale definition
+        /// (a query that lists it in `query_rules` fails with `REWRITE_RULE_DOESNT_EXIST`). The
+        /// background update task restores it if it does still exist in Keeper.
+        tryLogCurrentException(log, fmt::format(
+            "Could not re-read the rewrite rules after an uncertain write of rule `{}`, dropping it from the local cache",
+            rule_name));
+        remove(rule_name, lock);
+    }
 }
 
 /// Rules loaded from persisted storage bypass the `CREATE RULE` / `ALTER RULE` entrypoints,

@@ -48,6 +48,10 @@ protected:
 
     void reloadImpl(std::lock_guard<std::mutex> & lock);
 
+    /// Reconciles the local cache with the storage after a rule write threw, because the write
+    /// may have committed in Keeper before the error surfaced.
+    void resyncAfterUncertainWrite(const std::string & rule_name, std::lock_guard<std::mutex> & lock);
+
     void screenLoadedRules(RewriteRuleObjectsList & rules) const;
 
     const LoggerPtr log = getLogger("RewriteRule");
