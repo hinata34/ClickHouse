@@ -105,13 +105,17 @@ def test_reload_retried_after_a_transient_failure(started_cluster):
     )
 
     # From here on every reload on node2 throws right after listing.
+    fault_message = "Injecting fault after listing the rewrite rules"
+    faults_before = int(node2.count_in_log(fault_message))
     node2.query("SYSTEM ENABLE FAILPOINT rewrite_rules_reload_fail_after_list")
 
     node1.query("ALTER RULE rule_retry AS (SELECT 100) REWRITE TO (SELECT 300)")
 
-    # The watcher polls on `update_timeout_ms` (1000 ms here), so several cycles have gone by
-    # and every one of them has failed: node2 still serves the rule it loaded before.
-    time.sleep(5)
+    # Wait until several reload attempts have failed: node2 still serves the rule it loaded before.
+    deadline = time.monotonic() + 60
+    while int(node2.count_in_log(fault_message)) < faults_before + 3:
+        assert time.monotonic() < deadline, "the reload on node2 was not retried"
+        time.sleep(0.5)
     assert (
         node2.query("SELECT 100", settings={"query_rules": "rule_retry"}).strip()
         == "200"

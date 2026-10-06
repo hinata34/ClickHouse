@@ -1020,13 +1020,14 @@ void RewriteRules::updateFunc()
         else
         {
             tryLogCurrentException(__PRETTY_FUNCTION__);
-            chassert(false);
         }
     }
     catch (...)
     {
+        /// A failed reload is a runtime condition (a rule removed between listing and reading it,
+        /// a stored rule that no longer parses, a Keeper error), not a broken invariant: the update
+        /// stays outstanding (see `reloadImpl`), and the task is rescheduled below to retry it.
         DB::tryLogCurrentException(__PRETTY_FUNCTION__);
-        chassert(false);
     }
 
     if (!shutdown_called.load() && update_task)
